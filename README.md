@@ -1,5 +1,7 @@
 # ClaudeHooks
 
+[![CI](https://github.com/ElusiveHacker/ClaudeHooks/actions/workflows/ci.yml/badge.svg)](https://github.com/ElusiveHacker/ClaudeHooks/actions/workflows/ci.yml)
+
 Python **regex guardrails** for Claude Code that protect the host against
 **supply-chain attacks**, **destructive commands**, **host-hacking attempts**,
 and **prompt injection** — by inspecting content at the hook boundary and
