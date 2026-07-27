@@ -1,20 +1,29 @@
 # ClaudeHooks
 
-Python **regex guardrails** for Claude Code that inspect shell commands *before*
-they run and block dangerous ones — protecting the host against **supply-chain
-attacks**, **destructive commands**, and **host-hacking attempts**.
+Python **regex guardrails** for Claude Code that protect the host against
+**supply-chain attacks**, **destructive commands**, **host-hacking attempts**,
+and **prompt injection** — by inspecting content at the hook boundary and
+returning `allow` / `ask` / `deny` (or stripping the payload) based on
+documented attack patterns.
 
-It ships as a `PreToolUse` hook: Claude Code hands each `Bash` command to the
-hook, which returns `allow` / `ask` / `deny` based on documented attack patterns.
+It ships **two complementary layers**:
+
+1. **Action layer** — a `PreToolUse` hook that gates dangerous `Bash` commands.
+2. **Content layer** — a prompt-injection hook (`UserPromptSubmit` + `PostToolUse`)
+   that detects and strips injection payloads in the user's prompt and in
+   *tool output* (indirect injection).
 
 ## Layout
 
 | Path | Purpose |
 |------|---------|
-| `hooks/guardrails.py` | Detection engine — pure, side-effect-free regex rules + `scan()`. |
-| `hooks/pretooluse_guard.py` | Claude Code `PreToolUse` hook entrypoint (stdin JSON → decision). |
-| `tests/test_guardrails.py` | Payload-driven tests + false-positive guard. |
-| `docs/RESEARCH.md` | Papers, MITRE ATT&CK mapping, and incidents behind each rule. |
+| `hooks/guardrails.py` | Command detection engine — pure regex rules + `scan()`. |
+| `hooks/pretooluse_guard.py` | `PreToolUse` hook entrypoint (gates Bash commands). |
+| `hooks/prompt_injection.py` | Prompt-injection detection + `sanitize()` (strips invisible carriers). |
+| `hooks/prompt_injection_guard.py` | `UserPromptSubmit` / `PostToolUse` hook entrypoint. |
+| `tests/test_guardrails.py` | Command payloads + false-positive guard. |
+| `tests/test_prompt_injection.py` | Injection payloads (ASCII smuggling, base64 canary, homoglyphs) + false-positive guard. |
+| `docs/RESEARCH.md` | Papers, MITRE ATT&CK / OWASP LLM mapping, and incidents behind each rule. |
 
 ## What it catches
 
@@ -27,11 +36,19 @@ hook, which returns `allow` / `ask` / `deny` based on documented attack patterns
   setuid), credential theft (`~/.ssh/id_*`, `/etc/shadow`, env exfil),
   anti-forensics, firewall flushing. *(T1059, T1071, T1548, T1552, T1562, T1070)*
 
+- **Prompt injection** *(OWASP LLM01/LLM02)* — invisible Unicode (zero-width,
+  bidi, **Tag-block ASCII smuggling**), homoglyph/mixed-script, base64/hex
+  payloads that decode to injection phrases, "ignore previous instructions"
+  and role-override phrases, secret-exfiltration instructions, and HTML/CSS
+  hidden content — scanned in both the user prompt and *tool output*
+  (indirect injection). Based on
+  ["Prompt Injection, Deconstructed"](https://securityhorror.blogspot.com/2026/07/prompt-injection-deconstructed_01586936738.html).
+
 See [`docs/RESEARCH.md`](docs/RESEARCH.md) for the full threat model and citations.
 
 ## Install
 
-Add to `.claude/settings.json` (use an absolute path):
+Add to `.claude/settings.json` (use absolute paths):
 
 ```json
 {
@@ -42,6 +59,23 @@ Add to `.claude/settings.json` (use an absolute path):
         "hooks": [
           { "type": "command",
             "command": "python3 /abs/path/to/ClaudeHooks/hooks/pretooluse_guard.py" }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command",
+            "command": "python3 /abs/path/to/ClaudeHooks/hooks/prompt_injection_guard.py" }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "WebFetch|Read|Grep|mcp__github__.*",
+        "hooks": [
+          { "type": "command",
+            "command": "python3 /abs/path/to/ClaudeHooks/hooks/prompt_injection_guard.py" }
         ]
       }
     ]
