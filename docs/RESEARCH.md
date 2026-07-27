@@ -80,9 +80,69 @@ public catalogues (both defensive references).
 | MEDIUM | `ask` | Suspicious; defer to the human. |
 | LOW | `allow` | Informational; surfaced but permitted. |
 
+## 4. Prompt injection (content layer)
+
+Source: **"Prompt Injection, Deconstructed"** —
+<https://securityhorror.blogspot.com/2026/07/prompt-injection-deconstructed_01586936738.html>
+
+The article's central thesis: in an LLM there is **no privilege boundary between
+instructions and data** ("content is code"). Input-layer filtering is therefore a
+*speed bump* — an attacker adds one more encoding layer or invisible code point
+and walks past any static matcher. The durable controls are architectural. This
+maps onto the two hooks in this repo:
+
+- **Action layer (durable)** — the `PreToolUse` guard in `guardrails.py` already
+  gates dangerous *actions* (curl|bash, postinstall abuse, exfil commands),
+  which is exactly the "gate the action, not the string" control the article
+  recommends.
+- **Content layer (tripwire + sanitizer)** — `prompt_injection.py` implements the
+  article's detection taxonomy and, crucially, `sanitize()` which *removes* the
+  invisible smuggling channels outright (a real win, not just an alert).
+
+### Techniques encoded as rules
+
+| Article technique | Carrier | Rule | Decision |
+|---|---|---|---|
+| Invisible Unicode | zero-width `U+200B–200D/2060/FEFF`, bidi `U+202A–202E/2066–2069`, **Tag block `U+E0000–E007F` (ASCII smuggling)** | `PI_HIDDEN_UNICODE` | block |
+| Single/nested encoding | base64/hex/rot13 that **decodes to** an injection phrase | `PI_ENCODED_PAYLOAD` | block |
+| Direct injection / override | "ignore previous instructions", "reveal system prompt", the article's `INJECTED` canary | `PI_INJECTION_PHRASE` | block |
+| Exfiltration (kill-chain) | "send/email/POST secrets to …" | `PI_EXFIL_INSTRUCTION` | block |
+| Role redefinition | "you are now…", "developer mode", fake `System:` turn | `PI_ROLE_OVERRIDE` | warn |
+| Homoglyph / mixed-script | Cyrillic/Greek lookalikes inside Latin words (`U+0430` vs `U+0061`) | `PI_HOMOGLYPH` | warn |
+| Rendering-context hiding | `display:none`, `font-size:0`, `visibility:hidden`, off-screen | `PI_HTML_HIDDEN` | warn |
+| Staged/nested assembly | "decode … then run / reassemble the fragments" | `PI_STAGED_DECODE` | warn |
+
+All map to **OWASP LLM01** (Prompt Injection); exfiltration also touches **LLM02**.
+
+### Faithful implementation details from the article
+
+- **`sanitize()`** applies `unicodedata.normalize("NFKC", …)` *and* explicit
+  enumeration+deletion of hidden code points — the article's key finding is that
+  NFKC **alone does not strip** zero-width / Tag characters.
+- **Length-delta signal:** `hidden_char_count()` flags content whose invisible
+  character count is non-zero (article: `len(raw) - len(rendered_visible)`).
+- **Tag-block round-trip:** `decode_tags()` inverts `chr(0xE0000 + ord(c))` to
+  recover and report the smuggled shadow-ASCII.
+- **Indirect injection is the primary agent threat**, so the hook scans
+  `PostToolUse` output (poisoned issues, fetched pages, PR bodies), not only the
+  user's prompt.
+
+### Related prior work cited by the article
+- Riley Goodside — ChatGPT ASCII-smuggling demonstration.
+- Johann Rehberger — "ASCII Smuggler" tool; Microsoft Copilot Tag-block finding.
+- Boucher & Anderson — *Trojan Source: Invisible Vulnerabilities* (2021), the
+  bidi/homoglyph precedent.
+- The **"lethal trifecta"** framing (private-data access + untrusted content +
+  outbound channel) as the precondition for the agent kill-chain.
+
 ## Test corpus
 
-Every rule is exercised by a documented payload in
-[`tests/test_guardrails.py`](../tests/test_guardrails.py) (`MALICIOUS_PAYLOADS`),
-and a `BENIGN_COMMANDS` set guards against false positives on everyday developer
-commands. The samples are **detection fixtures**, not functional weapons.
+Every rule is exercised by a documented payload:
+- Command safety — [`tests/test_guardrails.py`](../tests/test_guardrails.py)
+  (`MALICIOUS_PAYLOADS`) plus a `BENIGN_COMMANDS` false-positive guard.
+- Prompt injection — [`tests/test_prompt_injection.py`](../tests/test_prompt_injection.py),
+  including the article's `INJECTED` canary, an `to_tags()` ASCII-smuggling
+  encoder, base64/nested-base64 payloads, and Cyrillic homoglyphs, plus a
+  `BENIGN` false-positive guard.
+
+The samples are **detection fixtures**, not functional weapons.
